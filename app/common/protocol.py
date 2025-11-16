@@ -44,13 +44,27 @@ class LoginMessage(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    """Chat message (placeholder for later)."""
+    """Encrypted chat message with integrity signature.
+    
+    Format: { "type":"msg", "seqno":n, "ts":unix_ms, "ct":base64, "sig":base64 }
+    """
     type: str = "msg"
-    # Will be filled in task 2.3
+    seqno: int  # Sequence number (strictly increasing)
+    ts: int  # Unix timestamp in milliseconds
+    ct: str  # Base64-encoded AES-encrypted ciphertext
+    sig: str  # Base64-encoded RSA signature of SHA256(seqno || ts || ct)
 
 
 class ReceiptMessage(BaseModel):
-    """Session receipt message (placeholder for later)."""
+    """Session receipt with signed transcript hash.
+    
+    Format: { "type":"receipt", "peer":"client|server", "first_seq":n, 
+              "last_seq":n, "transcript_sha256":hex, "sig":base64 }
+    """
     type: str = "receipt"
-    # Will be filled in later tasks
+    peer: str  # "client" or "server"
+    first_seq: int  # First sequence number in transcript
+    last_seq: int  # Last sequence number in transcript
+    transcript_sha256: str  # Hex string of transcript hash
+    sig: str  # Base64-encoded RSA signature of transcript hash
 
