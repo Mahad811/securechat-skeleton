@@ -103,16 +103,16 @@ def issue_certificate(
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ))
-    print(f"✓ Private key saved to: {key_path}")
+    print(f"[OK] Private key saved to: {key_path}")
     os.chmod(key_path, 0o600)  # Restrict permissions
     
     # Save certificate
     cert_path = Path(f"{output_prefix}_cert.pem")
     with open(cert_path, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
-    print(f"✓ Certificate saved to: {cert_path}")
+    print(f"[OK] Certificate saved to: {cert_path}")
     
-    print(f"\n✓ Certificate for '{cn}' issued successfully!")
+    print(f"\n[OK] Certificate for '{cn}' issued successfully!")
     print(f"  Certificate: {cert_path}")
     print(f"  Private Key: {key_path}")
     print(f"  Valid until: {cert.not_valid_after}")

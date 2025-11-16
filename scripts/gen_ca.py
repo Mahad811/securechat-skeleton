@@ -77,16 +77,16 @@ def create_root_ca(name: str, output_dir: Path = Path("certs")):
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption()
         ))
-    print(f"✓ CA private key saved to: {key_path}")
+    print(f"[OK] CA private key saved to: {key_path}")
     os.chmod(key_path, 0o600)  # Restrict permissions
     
     # Save certificate
     cert_path = output_dir / "ca_cert.pem"
     with open(cert_path, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
-    print(f"✓ CA certificate saved to: {cert_path}")
+    print(f"[OK] CA certificate saved to: {cert_path}")
     
-    print(f"\n✓ Root CA '{name}' created successfully!")
+    print(f"\n[OK] Root CA '{name}' created successfully!")
     print(f"  Certificate: {cert_path}")
     print(f"  Private Key: {key_path}")
     print(f"  Valid until: {cert.not_valid_after}")

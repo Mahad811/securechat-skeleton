@@ -2,9 +2,10 @@
 
 from pathlib import Path
 from cryptography import x509
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import NameOID, SignatureAlgorithmOID
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 from datetime import datetime
 
 
@@ -101,13 +102,36 @@ def verify_certificate_chain(
         # Get CA public key
         ca_public_key = ca_cert.public_key()
         
-        # Verify signature
+        # Extract hash algorithm from signature algorithm
+        # The signature_algorithm is a SignatureAlgorithm object
+        # We need to get the hash algorithm from it
+        sig_alg = cert.signature_algorithm_oid
+        
+        # Map signature algorithm OID to hash algorithm
+        # For RSA with SHA-256 (most common)
+        if sig_alg == SignatureAlgorithmOID.RSA_WITH_SHA256:
+            hash_alg = hashes.SHA256()
+        elif sig_alg == SignatureAlgorithmOID.RSA_WITH_SHA384:
+            hash_alg = hashes.SHA384()
+        elif sig_alg == SignatureAlgorithmOID.RSA_WITH_SHA512:
+            hash_alg = hashes.SHA512()
+        elif sig_alg == SignatureAlgorithmOID.RSA_WITH_SHA1:
+            hash_alg = hashes.SHA1()
+        else:
+            # Try to extract from the signature algorithm directly
+            # This is a fallback for other algorithms
+            raise BadCertError(f"Unsupported signature algorithm: {sig_alg}")
+        
+        # Verify signature using PKCS1v15 padding (standard for RSA)
         ca_public_key.verify(
             cert.signature,
             cert.tbs_certificate_bytes,
-            cert.signature_algorithm,
+            padding.PKCS1v15(),
+            hash_alg,
         )
         return True
+    except BadCertError:
+        raise
     except Exception as e:
         raise BadCertError(f"Certificate signature verification failed: {e}")
 
