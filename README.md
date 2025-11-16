@@ -1,3 +1,5 @@
+github link : https://github.com/Mahad811/securechat-skeleton.git
+
 # SecureChat – Assignment #2 (CS-3002 Information Security, Fall 2025)
 
 This repository implements a **console-based, PKI-enabled Secure Chat System** in **Python**, demonstrating how cryptographic primitives combine to achieve:
