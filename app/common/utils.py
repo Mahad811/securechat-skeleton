@@ -23,3 +23,8 @@ def b64d(s: str) -> bytes:
 def sha256_hex(data: bytes) -> str:
     """Compute SHA-256 hash and return hex string."""
     return hashlib.sha256(data).hexdigest()
+
+
+def sha256_bytes(data: bytes) -> bytes:
+    """Compute SHA-256 hash and return bytes."""
+    return hashlib.sha256(data).digest()
