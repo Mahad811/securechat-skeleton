@@ -19,32 +19,38 @@ class ErrorMessage(BaseModel):
     error: str  # Error code: BAD_CERT, SIG_FAIL, REPLAY, etc.
 
 
-# Placeholder for other message types (to be implemented later)
-class RegisterMessage(BaseModel):
-    """User registration message."""
-    pass
-
-
-class LoginMessage(BaseModel):
-    """User login message."""
-    pass
-
-
 class DHClientMessage(BaseModel):
-    """Diffie-Hellman client message."""
-    pass
+    """Diffie–Hellman client message (client → server)."""
+    type: str = "dh_client"
+    pub: str  # Client public value A as decimal string
 
 
 class DHServerMessage(BaseModel):
-    """Diffie-Hellman server message."""
-    pass
+    """Diffie–Hellman server message (server → client)."""
+    type: str = "dh_server"
+    pub: str  # Server public value B as decimal string
+
+
+class RegisterMessage(BaseModel):
+    """Encrypted registration payload (email, username, password)."""
+    type: str = "register"
+    ct: str  # Base64-encoded ciphertext of JSON {email, username, password}
+
+
+class LoginMessage(BaseModel):
+    """Encrypted login payload (username, password)."""
+    type: str = "login"
+    ct: str  # Base64-encoded ciphertext of JSON {username, password}
 
 
 class ChatMessage(BaseModel):
-    """Chat message."""
-    pass
+    """Chat message (placeholder for later)."""
+    type: str = "msg"
+    # Will be filled in task 2.3
 
 
 class ReceiptMessage(BaseModel):
-    """Session receipt message."""
-    pass
+    """Session receipt message (placeholder for later)."""
+    type: str = "receipt"
+    # Will be filled in later tasks
+
