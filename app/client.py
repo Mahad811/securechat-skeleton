@@ -17,7 +17,9 @@ from app.crypto.pki import (
 )
 from app.crypto.dh import generate_dh_keypair, compute_shared_secret, ks_to_key
 from app.crypto.aes import aes_encrypt_ecb, aes_decrypt_ecb
-from app.common.utils import b64e, b64d
+from app.crypto.sign import load_private_key, rsa_sign
+from app.storage.transcript import Transcript, get_cert_fingerprint
+from app.common.utils import b64e, b64d, now_ms, sha256_bytes
 from app.common.protocol import (
     HelloMessage,
     ServerHelloMessage,
@@ -26,6 +28,8 @@ from app.common.protocol import (
     DHServerMessage,
     RegisterMessage,
     LoginMessage,
+    ChatMessage,
+    ReceiptMessage,
 )
 
 
@@ -199,6 +203,138 @@ def main():
             resp = receive_message(sock)
             if resp.get("type") == "login_ok":
                 print("[OK] Login successful")
+                
+                # -----------------------------
+                # Establish chat session key (second DH exchange)
+                # -----------------------------
+                print("Establishing chat session key...")
+                # Generate new DH keypair for chat session
+                chat_priv, chat_pub = generate_dh_keypair()
+                dh_chat_client = DHClientMessage(pub=str(chat_pub))
+                send_message(sock, dh_chat_client.model_dump())
+                
+                # Receive server's chat DH public value
+                dh_chat_resp = receive_message(sock)
+                dh_chat_server = DHServerMessage(**dh_chat_resp)
+                chat_srv_pub = int(dh_chat_server.pub)
+                
+                # Compute shared secret and derive chat session key
+                chat_shared_secret = compute_shared_secret(chat_priv, chat_srv_pub)
+                chat_session_key = ks_to_key(chat_shared_secret)
+                print("[OK] Chat session key established")
+                print("  Ready for encrypted messaging")
+                
+                # Load client private key for signing messages
+                client_key_path = Path("certs/client_key.pem")
+                if not client_key_path.exists():
+                    print("ERROR: Client private key not found for message signing")
+                    sys.exit(1)
+                client_private_key = load_private_key(client_key_path)
+                
+                # Initialize transcript
+                transcript_path = Path("transcripts") / f"client_session_{now_ms()}.txt"
+                transcript = Transcript(transcript_path)
+                server_cert_fingerprint = get_cert_fingerprint(server_cert_data)
+                
+                # -----------------------------
+                # Encrypted chat messaging
+                # -----------------------------
+                seqno = 0
+                print("\n--- Chat Session Started ---")
+                print("Type messages (or 'quit' to exit):")
+                
+                while True:
+                    try:
+                        # Read plaintext from console
+                        plaintext = input("You: ").strip()
+                        if not plaintext:
+                            continue
+                        if plaintext.lower() == 'quit':
+                            break
+                        
+                        # Increment sequence number
+                        seqno += 1
+                        timestamp = now_ms()
+                        
+                        # Encrypt plaintext with AES-128
+                        plaintext_bytes = plaintext.encode('utf-8')
+                        ciphertext = aes_encrypt_ecb(chat_session_key, plaintext_bytes)
+                        ciphertext_b64 = b64e(ciphertext)
+                        
+                        # Compute hash: SHA256(seqno || timestamp || ciphertext)
+                        seqno_bytes = seqno.to_bytes(8, byteorder='big')
+                        ts_bytes = timestamp.to_bytes(8, byteorder='big')
+                        ct_bytes = b64d(ciphertext_b64)
+                        hash_input = seqno_bytes + ts_bytes + ct_bytes
+                        message_hash = sha256_bytes(hash_input)
+                        
+                        # Sign hash with RSA private key
+                        signature = rsa_sign(client_private_key, message_hash)
+                        signature_b64 = b64e(signature)
+                        
+                        # Send message
+                        chat_msg = ChatMessage(
+                            seqno=seqno,
+                            ts=timestamp,
+                            ct=ciphertext_b64,
+                            sig=signature_b64
+                        )
+                        send_message(sock, chat_msg.model_dump())
+                        
+                        # Store in transcript
+                        transcript.append(
+                            seqno=seqno,
+                            timestamp=timestamp,
+                            ciphertext=ciphertext_b64,
+                            signature=signature_b64,
+                            peer_cert_fingerprint=server_cert_fingerprint
+                        )
+                        
+                    except KeyboardInterrupt:
+                        break
+                    except Exception as e:
+                        print(f"ERROR sending message: {e}")
+                        break
+                
+                print("\n--- Chat Session Ended ---")
+                
+                # -----------------------------
+                # Generate and exchange Session Receipt
+                # -----------------------------
+                print("Generating session receipt...")
+                transcript_hash = transcript.get_transcript_hash()
+                transcript_hash_bytes = transcript.get_transcript_hash_bytes()
+                
+                # Sign transcript hash
+                receipt_signature = rsa_sign(client_private_key, transcript_hash_bytes)
+                receipt_sig_b64 = b64e(receipt_signature)
+                
+                # Create receipt
+                receipt = ReceiptMessage(
+                    peer="client",
+                    first_seq=transcript.get_first_seqno() or 0,
+                    last_seq=transcript.get_last_seqno() or 0,
+                    transcript_sha256=transcript_hash,
+                    sig=receipt_sig_b64
+                )
+                
+                # Send receipt to server
+                send_message(sock, receipt.model_dump())
+                print(f"[OK] Session receipt sent")
+                print(f"  Transcript hash: {transcript_hash}")
+                print(f"  Sequence range: {receipt.first_seq} - {receipt.last_seq}")
+                print(f"  Transcript saved to: {transcript_path}")
+                
+                # Receive server's receipt
+                try:
+                    server_receipt_data = receive_message(sock)
+                    if server_receipt_data.get("type") == "receipt":
+                        server_receipt = ReceiptMessage(**server_receipt_data)
+                        print(f"[OK] Received server receipt")
+                        print(f"  Server transcript hash: {server_receipt.transcript_sha256}")
+                except Exception as e:
+                    print(f"Warning: Could not receive server receipt: {e}")
+                
             elif resp.get("error") == "LOGIN_FAIL":
                 print("ERROR: Invalid username or password")
             else:

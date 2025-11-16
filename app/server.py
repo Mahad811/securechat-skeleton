@@ -17,8 +17,10 @@ from app.crypto.pki import (
 )
 from app.crypto.dh import generate_dh_keypair, compute_shared_secret, ks_to_key
 from app.crypto.aes import aes_encrypt_ecb, aes_decrypt_ecb
+from app.crypto.sign import get_public_key_from_cert, rsa_verify, load_private_key, rsa_sign
 from app.storage.db import UserDB
-from app.common.utils import b64e, b64d
+from app.storage.transcript import Transcript, get_cert_fingerprint
+from app.common.utils import b64e, b64d, sha256_bytes, now_ms
 from app.common.protocol import (
     HelloMessage,
     ServerHelloMessage,
@@ -27,6 +29,8 @@ from app.common.protocol import (
     DHServerMessage,
     RegisterMessage,
     LoginMessage,
+    ChatMessage,
+    ReceiptMessage,
 )
 
 
@@ -61,6 +65,11 @@ def handle_client(conn: socket.socket, addr: tuple):
     """Handle a client connection."""
     print(f"\n[Client {addr[0]}:{addr[1]}] Connected")
     
+    # Track sequence number for replay protection
+    last_seqno = 0
+    client_cert_data = None
+    chat_session_key = None
+    
     try:
         # Receive client certificate
         print(f"[Client {addr[0]}:{addr[1]}] Waiting for client certificate...")
@@ -76,6 +85,9 @@ def handle_client(conn: socket.socket, addr: tuple):
             return
         
         client_cert_data = b64d(client_hello.cert)
+        
+        # Store client cert data for later signature verification
+        stored_client_cert_data = client_cert_data
         
         # Validate client certificate
         print(f"[Client {addr[0]}:{addr[1]}] Validating client certificate...")
@@ -203,6 +215,166 @@ def handle_client(conn: socket.socket, addr: tuple):
             if db.verify_user(username=username, password=password):
                 send_message(conn, {"type": "login_ok"})
                 print(f"[Client {addr[0]}:{addr[1]}] [OK] Login succeeded")
+                
+                # -----------------------------
+                # Establish chat session key (second DH exchange)
+                # -----------------------------
+                print(f"[Client {addr[0]}:{addr[1]}] Establishing chat session key...")
+                
+                # Receive client's chat DH public value
+                dh_chat_req = receive_message(conn)
+                dh_chat_client = DHClientMessage(**dh_chat_req)
+                chat_client_pub = int(dh_chat_client.pub)
+                
+                # Generate server chat keypair and compute shared secret
+                chat_srv_priv, chat_srv_pub = generate_dh_keypair()
+                chat_shared_secret = compute_shared_secret(chat_srv_priv, chat_client_pub)
+                chat_session_key = ks_to_key(chat_shared_secret)
+                
+                # Send server's chat DH public value
+                dh_chat_server = DHServerMessage(pub=str(chat_srv_pub))
+                send_message(conn, dh_chat_server.model_dump())
+                print(f"[Client {addr[0]}:{addr[1]}] [OK] Chat session key established")
+                print("  Ready for encrypted messaging")
+                
+                # chat_session_key is already set above
+                
+                # Initialize transcript
+                transcript_path = Path("transcripts") / f"server_session_{addr[0]}_{addr[1]}_{now_ms()}.txt"
+                transcript = Transcript(transcript_path)
+                client_cert_fingerprint = get_cert_fingerprint(stored_client_cert_data)
+                
+                # Load server private key for receipt signing
+                server_key_path = Path("certs/server_key.pem")
+                if not server_key_path.exists():
+                    print(f"[Client {addr[0]}:{addr[1]}] ERROR: Server private key not found")
+                    return
+                server_private_key = load_private_key(server_key_path)
+                
+                # -----------------------------
+                # Receive and verify encrypted chat messages
+                # -----------------------------
+                print(f"[Client {addr[0]}:{addr[1]}] Waiting for chat messages...")
+                
+                while True:
+                    try:
+                        # Receive chat message
+                        msg = receive_message(conn)
+                        
+                        # Check if it's a chat message
+                        if msg.get("type") != "msg":
+                            # Not a chat message, might be other protocol message
+                            continue
+                        
+                        chat_msg = ChatMessage(**msg)
+                        
+                        # 1. Check sequence number (replay protection)
+                        if chat_msg.seqno <= last_seqno:
+                            print(f"[Client {addr[0]}:{addr[1]}] ERROR: Replay detected - seqno {chat_msg.seqno} <= last {last_seqno}")
+                            err = ErrorMessage(error="REPLAY")
+                            send_message(conn, err.model_dump())
+                            return
+                        
+                        last_seqno = chat_msg.seqno
+                        
+                        # 2. Verify signature
+                        # Recompute hash: SHA256(seqno || timestamp || ciphertext)
+                        seqno_bytes = chat_msg.seqno.to_bytes(8, byteorder='big')
+                        ts_bytes = chat_msg.ts.to_bytes(8, byteorder='big')
+                        ct_bytes = b64d(chat_msg.ct)
+                        hash_input = seqno_bytes + ts_bytes + ct_bytes
+                        message_hash = sha256_bytes(hash_input)
+                        
+                        # Get client's public key from certificate
+                        client_public_key = get_public_key_from_cert(stored_client_cert_data)
+                        signature = b64d(chat_msg.sig)
+                        
+                        # Verify signature
+                        if not rsa_verify(client_public_key, message_hash, signature):
+                            print(f"[Client {addr[0]}:{addr[1]}] ERROR: Signature verification failed")
+                            err = ErrorMessage(error="SIG_FAIL")
+                            send_message(conn, err.model_dump())
+                            return
+                        
+                        # 3. Decrypt ciphertext
+                        plaintext_bytes = aes_decrypt_ecb(chat_session_key, ct_bytes)
+                        plaintext = plaintext_bytes.decode('utf-8')
+                        
+                        # 4. Display message
+                        print(f"[Client {addr[0]}:{addr[1]}] Message (seqno={chat_msg.seqno}): {plaintext}")
+                        
+                        # 5. Store in transcript
+                        transcript.append(
+                            seqno=chat_msg.seqno,
+                            timestamp=chat_msg.ts,
+                            ciphertext=chat_msg.ct,
+                            signature=chat_msg.sig,
+                            peer_cert_fingerprint=client_cert_fingerprint
+                        )
+                        
+                    except KeyboardInterrupt:
+                        break
+                    except Exception as e:
+                        print(f"[Client {addr[0]}:{addr[1]}] ERROR processing message: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        break
+                
+                # -----------------------------
+                # Generate and exchange Session Receipt
+                # -----------------------------
+                print(f"[Client {addr[0]}:{addr[1]}] Generating session receipt...")
+                
+                # Check if we received client's receipt first
+                try:
+                    # Try to receive client receipt (non-blocking check)
+                    # In practice, we'd wait for it, but for simplicity, generate our receipt
+                    pass
+                except:
+                    pass
+                
+                # Generate server receipt
+                transcript_hash = transcript.get_transcript_hash()
+                transcript_hash_bytes = transcript.get_transcript_hash_bytes()
+                
+                # Sign transcript hash
+                receipt_signature = rsa_sign(server_private_key, transcript_hash_bytes)
+                receipt_sig_b64 = b64e(receipt_signature)
+                
+                # Create receipt
+                server_receipt = ReceiptMessage(
+                    peer="server",
+                    first_seq=transcript.get_first_seqno() or 0,
+                    last_seq=transcript.get_last_seqno() or 0,
+                    transcript_sha256=transcript_hash,
+                    sig=receipt_sig_b64
+                )
+                
+                # Try to receive client receipt if available
+                try:
+                    client_receipt_data = receive_message(conn)
+                    if client_receipt_data.get("type") == "receipt":
+                        client_receipt = ReceiptMessage(**client_receipt_data)
+                        print(f"[Client {addr[0]}:{addr[1]}] [OK] Received client receipt")
+                        print(f"  Client transcript hash: {client_receipt.transcript_sha256}")
+                        
+                        # Verify client receipt signature
+                        client_public_key = get_public_key_from_cert(stored_client_cert_data)
+                        client_receipt_hash_bytes = bytes.fromhex(client_receipt.transcript_sha256)
+                        if rsa_verify(client_public_key, client_receipt_hash_bytes, b64d(client_receipt.sig)):
+                            print(f"[Client {addr[0]}:{addr[1]}] [OK] Client receipt signature verified")
+                        else:
+                            print(f"[Client {addr[0]}:{addr[1]}] WARNING: Client receipt signature verification failed")
+                except Exception as e:
+                    print(f"[Client {addr[0]}:{addr[1]}] Note: Could not receive client receipt: {e}")
+                
+                # Send server receipt
+                send_message(conn, server_receipt.model_dump())
+                print(f"[Client {addr[0]}:{addr[1]}] [OK] Server receipt sent")
+                print(f"  Transcript hash: {transcript_hash}")
+                print(f"  Sequence range: {server_receipt.first_seq} - {server_receipt.last_seq}")
+                print(f"  Transcript saved to: {transcript_path}")
+                
             else:
                 err = ErrorMessage(error="LOGIN_FAIL")
                 send_message(conn, err.model_dump())
